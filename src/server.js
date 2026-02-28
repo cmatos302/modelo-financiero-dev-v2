@@ -364,17 +364,23 @@ app.get('/api/v1/planillas', { preHandler: [app.auth] }, async (req) => {
       where,
       orderBy: { fecha: 'desc' },
       skip: (q.page - 1) * q.limit,
-      take: q.limit
+      take: q.limit,
+      include: { items: { select: { horas: true, tipo: true } } }
     })
   ]);
-  const items = rows.map(r => ({
-    id: r.id,
-    correlativo: r.correlativo,
-    fecha: r.fecha,
-    cliente: r.cliente,
-    proyecto: r.proyecto,
-    monto_bruto_usd: Number(r.montoBrutoUsd)
-  }));
+  const items = rows.map(r => {
+    const horasTotal = (r.items || []).reduce((acc, it) => acc + Number(it?.horas || 0), 0);
+    return {
+      id: r.id,
+      correlativo: r.correlativo,
+      fecha: r.fecha,
+      cliente: r.cliente,
+      proyecto: r.proyecto,
+      monto_bruto_usd: Number(r.montoBrutoUsd),
+      horas: horasTotal,
+      tipo: (r.items?.[0]?.tipo || 'FORMULADAS')
+    };
+  });
   return { items, total, page: q.page, limit: q.limit };
 });
 
@@ -385,15 +391,43 @@ app.get('/api/v1/planillas/:id', { preHandler: [app.auth] }, async (req, reply) 
     return p;
   }
 
-  const p = await prisma.planilla.findUnique({ where: { id: req.params.id } });
+  const p = await prisma.planilla.findUnique({
+    where: { id: req.params.id },
+    include: {
+      items: {
+        select: {
+          id: true,
+          tipo: true,
+          nombre: true,
+          especialidad: true,
+          tarifaUsd: true,
+          horas: true,
+          costoUsd: true
+        }
+      }
+    }
+  });
   if (!p) return reply.code(404).send({ error: 'No encontrado' });
+
+  const horasTotal = (p.items || []).reduce((acc, it) => acc + Number(it?.horas || 0), 0);
   return {
     id: p.id,
     correlativo: p.correlativo,
     fecha: p.fecha,
     cliente: p.cliente,
     proyecto: p.proyecto,
-    monto_bruto_usd: Number(p.montoBrutoUsd)
+    monto_bruto_usd: Number(p.montoBrutoUsd),
+    horas: horasTotal,
+    tipo: (p.items?.[0]?.tipo || 'FORMULADAS'),
+    items: (p.items || []).map(it => ({
+      id: it.id,
+      tipo: it.tipo,
+      nombre: it.nombre,
+      especialidad: it.especialidad,
+      tarifa_usd: it.tarifaUsd == null ? null : Number(it.tarifaUsd),
+      horas: it.horas == null ? null : Number(it.horas),
+      costo_usd: it.costoUsd == null ? null : Number(it.costoUsd)
+    }))
   };
 });
 
