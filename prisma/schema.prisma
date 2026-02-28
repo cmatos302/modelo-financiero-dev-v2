@@ -1,0 +1,100 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  admin_gerente
+  operador
+  consulta
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  auditLogs    AuditLog[]
+}
+
+model Planilla {
+  id            String   @id @default(cuid())
+  correlativo   String   @unique
+  fecha         DateTime @default(now())
+  cliente       String
+  proyecto      String
+  montoBrutoUsd Decimal  @db.Decimal(14, 2)
+
+  items         PlanillaItem[]
+  auditLogs     AuditLog[]
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([fecha])
+  @@index([cliente])
+  @@index([proyecto])
+}
+
+model PlanillaItem {
+  id          String   @id @default(cuid())
+  planillaId  String
+  tipo        String
+  nombre      String
+  especialidad String?
+  tarifaUsd   Decimal? @db.Decimal(14, 2)
+  horas       Decimal? @db.Decimal(10, 2)
+  costoUsd    Decimal? @db.Decimal(14, 2)
+
+  planilla    Planilla  @relation(fields: [planillaId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([planillaId])
+}
+
+model Tasa {
+  id        String   @id @default(cuid())
+  fecha     DateTime @default(now())
+  bcv       Decimal  @db.Decimal(12, 4)
+  paralela  Decimal  @db.Decimal(12, 4)
+  fuente    String
+
+  auditLogs AuditLog[]
+
+  @@index([fecha])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  userId      String
+  recurso     String
+  recursoId   String?
+  accion      String
+  beforeJson  Json?
+  afterJson   Json?
+  ip          String?
+  userAgent   String?
+  createdAt   DateTime @default(now())
+
+  user        User      @relation(fields: [userId], references: [id])
+  planillaId  String?
+  planilla    Planilla? @relation(fields: [planillaId], references: [id], onDelete: SetNull)
+  tasaId      String?
+  tasa        Tasa?     @relation(fields: [tasaId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([recurso])
+  @@index([accion])
+  @@index([createdAt])
+}
