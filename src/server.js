@@ -432,14 +432,14 @@ app.get('/api/v1/planillas/:id', { preHandler: [app.auth] }, async (req, reply) 
 });
 
 app.post('/api/v1/planillas', { preHandler: [app.auth, app.mustWrite] }, async (req, reply) => {
-  const schema = z.object({ cliente: z.string().min(1), proyecto: z.string().min(1), monto_bruto_usd: z.number().nonnegative() });
+  const schema = z.object({ cliente: z.string().min(1), proyecto: z.string().min(1), monto_bruto_usd: z.number().nonnegative(), horas: z.number().nonnegative().optional(), tipo: z.string().min(1).optional() });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return reply.code(422).send({ error: 'Payload inválido' });
 
   if (!dbEnabled) {
     const id = `pln_${String(planillasMem.length + 1).padStart(3, '0')}`;
     const correlativo = String(planillasMem.length + 1).padStart(4, '0');
-    const item = { id, correlativo, fecha: new Date().toISOString(), ...parsed.data };
+    const item = { id, correlativo, fecha: new Date().toISOString(), ...parsed.data, tipo: parsed.data.tipo || 'FORMULADAS', horas: parsed.data.horas ?? 0 };
     planillasMem.push(item);
     return reply.code(201).send(item);
   }
@@ -455,6 +455,17 @@ app.post('/api/v1/planillas', { preHandler: [app.auth, app.mustWrite] }, async (
     }
   });
 
+  if (typeof parsed.data.horas === 'number' || parsed.data.tipo) {
+    await prisma.planillaItem.create({
+      data: {
+        planillaId: created.id,
+        tipo: parsed.data.tipo || 'FORMULADAS',
+        nombre: 'Servicio consultoría',
+        horas: typeof parsed.data.horas === 'number' ? parsed.data.horas : null
+      }
+    });
+  }
+
   await auditLog({
     req,
     recurso: 'planilla',
@@ -465,7 +476,9 @@ app.post('/api/v1/planillas', { preHandler: [app.auth, app.mustWrite] }, async (
       correlativo: created.correlativo,
       cliente: created.cliente,
       proyecto: created.proyecto,
-      monto_bruto_usd: Number(created.montoBrutoUsd)
+      monto_bruto_usd: Number(created.montoBrutoUsd),
+      horas: parsed.data.horas ?? 0,
+      tipo: parsed.data.tipo || 'FORMULADAS'
     },
     planillaId: created.id
   });
@@ -476,19 +489,21 @@ app.post('/api/v1/planillas', { preHandler: [app.auth, app.mustWrite] }, async (
     fecha: created.fecha,
     cliente: created.cliente,
     proyecto: created.proyecto,
-    monto_bruto_usd: Number(created.montoBrutoUsd)
+    monto_bruto_usd: Number(created.montoBrutoUsd),
+    horas: parsed.data.horas ?? 0,
+    tipo: parsed.data.tipo || 'FORMULADAS'
   });
 });
 
 app.put('/api/v1/planillas/:id', { preHandler: [app.auth, app.mustWrite] }, async (req, reply) => {
-  const schema = z.object({ cliente: z.string().min(1).optional(), proyecto: z.string().min(1).optional(), monto_bruto_usd: z.number().nonnegative().optional() });
+  const schema = z.object({ cliente: z.string().min(1).optional(), proyecto: z.string().min(1).optional(), monto_bruto_usd: z.number().nonnegative().optional(), horas: z.number().nonnegative().optional(), tipo: z.string().min(1).optional() });
   const parsed = schema.safeParse(req.body || {});
   if (!parsed.success) return reply.code(422).send({ error: 'Payload inválido' });
 
   if (!dbEnabled) {
     const idx = planillasMem.findIndex(x => x.id === req.params.id);
     if (idx < 0) return reply.code(404).send({ error: 'No encontrado' });
-    planillasMem[idx] = { ...planillasMem[idx], ...parsed.data };
+    planillasMem[idx] = { ...planillasMem[idx], ...parsed.data, ...(parsed.data.tipo ? { tipo: parsed.data.tipo } : {}), ...(typeof parsed.data.horas === 'number' ? { horas: parsed.data.horas } : {}) };
     return planillasMem[idx];
   }
 
@@ -503,6 +518,28 @@ app.put('/api/v1/planillas/:id', { preHandler: [app.auth, app.mustWrite] }, asyn
       ...(typeof parsed.data.monto_bruto_usd === 'number' ? { montoBrutoUsd: parsed.data.monto_bruto_usd } : {})
     }
   });
+
+  if (typeof parsed.data.horas === 'number' || parsed.data.tipo) {
+    const firstItem = await prisma.planillaItem.findFirst({ where: { planillaId: req.params.id }, orderBy: { createdAt: 'asc' } });
+    if (firstItem) {
+      await prisma.planillaItem.update({
+        where: { id: firstItem.id },
+        data: {
+          ...(typeof parsed.data.horas === 'number' ? { horas: parsed.data.horas } : {}),
+          ...(parsed.data.tipo ? { tipo: parsed.data.tipo } : {})
+        }
+      });
+    } else {
+      await prisma.planillaItem.create({
+        data: {
+          planillaId: req.params.id,
+          tipo: parsed.data.tipo || 'FORMULADAS',
+          nombre: 'Servicio consultoría',
+          horas: typeof parsed.data.horas === 'number' ? parsed.data.horas : null
+        }
+      });
+    }
+  }
 
   await auditLog({
     req,
@@ -521,7 +558,9 @@ app.put('/api/v1/planillas/:id', { preHandler: [app.auth, app.mustWrite] }, asyn
       correlativo: updated.correlativo,
       cliente: updated.cliente,
       proyecto: updated.proyecto,
-      monto_bruto_usd: Number(updated.montoBrutoUsd)
+      monto_bruto_usd: Number(updated.montoBrutoUsd),
+      ...(typeof parsed.data.horas === 'number' ? { horas: parsed.data.horas } : {}),
+      ...(parsed.data.tipo ? { tipo: parsed.data.tipo } : {})
     },
     planillaId: updated.id
   });
@@ -532,7 +571,9 @@ app.put('/api/v1/planillas/:id', { preHandler: [app.auth, app.mustWrite] }, asyn
     fecha: updated.fecha,
     cliente: updated.cliente,
     proyecto: updated.proyecto,
-    monto_bruto_usd: Number(updated.montoBrutoUsd)
+    monto_bruto_usd: Number(updated.montoBrutoUsd),
+    ...(typeof parsed.data.horas === 'number' ? { horas: parsed.data.horas } : {}),
+    ...(parsed.data.tipo ? { tipo: parsed.data.tipo } : {})
   };
 });
 
