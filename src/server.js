@@ -14,6 +14,9 @@ import { prisma, dbEnabled } from './db.js';
 
 dotenv.config();
 
+const APP_VERSION = process.env.APP_VERSION || 'dev-v2';
+const APP_STARTED_AT = Date.now();
+
 const app = Fastify({ logger: true, routerOptions: { maxParamLength: 2048 } });
 
 const corsOrigins = (process.env.CORS_ORIGINS || '*').split(',').map(x => x.trim()).filter(Boolean);
@@ -30,9 +33,21 @@ await app.register(rateLimit, {
   timeWindow: process.env.RATE_LIMIT_WINDOW || '1 minute'
 });
 await app.register(jwt, { secret: process.env.JWT_SECRET || 'dev-secret-change-me' });
+
+app.setErrorHandler((error, req, reply) => {
+  req.log.error({ err: error, path: req.url, method: req.method }, 'Unhandled API error');
+  if (reply.sent) return;
+  const statusCode = error.statusCode && Number(error.statusCode) >= 400 ? Number(error.statusCode) : 500;
+  reply.code(statusCode).send({ error: statusCode >= 500 ? 'Error interno' : (error.message || 'Error') });
+});
 await app.register(fastifyStatic, {
   root: path.join(process.cwd(), 'public'),
   prefix: '/'
+});
+
+app.addHook('onResponse', async (req, reply) => {
+  const rt = reply.elapsedTime;
+  req.log.info({ method: req.method, url: req.url, statusCode: reply.statusCode, responseTimeMs: rt }, 'request_done');
 });
 
 const usersMem = [
@@ -81,7 +96,7 @@ async function buildPlanillaPdfBuffer(planilla) {
   const correlativo = String(planilla.correlativo || '').padStart(4, '0');
   const fecha = new Date(planilla.fecha || Date.now()).toLocaleString('es-VE');
 
-  const doc = new PDFDocument({ size: 'A4', margin: 48 });
+  const doc = new PDFDocument({ size: 'A4', margin: 42 });
   const chunks = [];
   doc.on('data', chunk => chunks.push(chunk));
   const pdfBufferPromise = new Promise((resolve, reject) => {
@@ -89,19 +104,52 @@ async function buildPlanillaPdfBuffer(planilla) {
     doc.on('error', reject);
   });
 
-  doc.fontSize(18).text('MAM HARDSOFT NETWORK TECHNOLOGY C.A.', { align: 'center' });
-  doc.moveDown(0.2);
-  doc.fontSize(14).text('Planilla de Consultoría (Oficial)', { align: 'center' });
-  doc.moveDown(1.2);
-  doc.fontSize(11);
-  doc.text(`Correlativo: ${correlativo}`);
-  doc.text(`Fecha: ${fecha}`);
-  doc.text(`Cliente: ${planilla.cliente || '-'}`);
-  doc.text(`Proyecto: ${planilla.proyecto || '-'}`);
-  doc.moveDown(0.8);
-  doc.fontSize(12).text(`Monto bruto (USD): ${monto.toFixed(2)}`);
-  doc.moveDown(1.2);
-  doc.fontSize(9).fillColor('#555').text('Documento generado por API (server-side PDF).', { align: 'left' });
+  const logoPath = path.join(process.cwd(), 'public', 'Logo_Hardsoft.jpg');
+  if (fs.existsSync(logoPath)) {
+    try { doc.image(logoPath, 42, 34, { width: 60 }); } catch (_) {}
+  }
+
+  doc
+    .fontSize(17)
+    .fillColor('#1d1d1f')
+    .text('MAM HARDSOFT NETWORK TECHNOLOGY C.A.', 110, 44, { align: 'left' })
+    .fontSize(12)
+    .fillColor('#4b5563')
+    .text('Planilla de Consultoría (Oficial)', 110, 68, { align: 'left' });
+
+  doc.moveTo(42, 104).lineTo(553, 104).strokeColor('#d1d5db').lineWidth(1).stroke();
+
+  const cardY = 118;
+  doc.roundedRect(42, cardY, 511, 110, 10).fillAndStroke('#f9fafb', '#e5e7eb');
+
+  doc
+    .fillColor('#111827')
+    .fontSize(11)
+    .text(`Correlativo: ${correlativo}`, 56, cardY + 18)
+    .text(`Fecha: ${fecha}`, 56, cardY + 38)
+    .text(`Cliente: ${planilla.cliente || '-'}`, 56, cardY + 58)
+    .text(`Proyecto: ${planilla.proyecto || '-'}`, 56, cardY + 78, { width: 480 });
+
+  const tableY = 252;
+  doc.roundedRect(42, tableY, 511, 90, 8).strokeColor('#e5e7eb').stroke();
+  doc.rect(42, tableY, 511, 28).fill('#f3f4f6');
+  doc
+    .fillColor('#111827')
+    .fontSize(11)
+    .text('Concepto', 56, tableY + 9)
+    .text('Monto (USD)', 430, tableY + 9, { width: 110, align: 'right' });
+
+  doc
+    .fillColor('#111827')
+    .fontSize(12)
+    .text('Monto bruto facturado', 56, tableY + 45)
+    .text(monto.toFixed(2), 430, tableY + 45, { width: 110, align: 'right' });
+
+  doc
+    .fillColor('#6b7280')
+    .fontSize(9)
+    .text('Documento emitido por API en modo server-side PDF. Uso oficial interno.', 42, 785, { align: 'left' });
+
   doc.end();
 
   const buffer = await pdfBufferPromise;
@@ -177,6 +225,15 @@ async function findUserByEmail(email) {
 }
 
 app.get('/health', async () => ({ ok: true, service: 'gestion-financiera-api-v2', dbEnabled }));
+app.get('/api/v1/status', async () => ({
+  ok: true,
+  service: 'gestion-financiera-api-v2',
+  version: APP_VERSION,
+  uptimeSec: Math.floor((Date.now() - APP_STARTED_AT) / 1000),
+  dbEnabled,
+  storageMode: (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) ? 'supabase' : 'local',
+  env: process.env.NODE_ENV || 'development'
+}));
 app.get('/', async (_req, reply) => reply.sendFile('index.html'));
 
 app.post('/api/v1/auth/login', async (req, reply) => {
@@ -265,6 +322,8 @@ app.get('/api/v1/planillas', { preHandler: [app.auth] }, async (req) => {
   const querySchema = z.object({
     cliente: z.string().optional(),
     proyecto: z.string().optional(),
+    from: z.string().optional(),
+    to: z.string().optional(),
     page: z.coerce.number().optional().default(1),
     limit: z.coerce.number().optional().default(20)
   });
@@ -274,6 +333,14 @@ app.get('/api/v1/planillas', { preHandler: [app.auth] }, async (req) => {
     let items = [...planillasMem];
     if (q.cliente) items = items.filter(x => (x.cliente || '').toLowerCase().includes(q.cliente.toLowerCase()));
     if (q.proyecto) items = items.filter(x => (x.proyecto || '').toLowerCase().includes(q.proyecto.toLowerCase()));
+    if (q.from) {
+      const fd = new Date(`${q.from}T00:00:00`);
+      items = items.filter(x => new Date(x.fecha) >= fd);
+    }
+    if (q.to) {
+      const td = new Date(`${q.to}T23:59:59`);
+      items = items.filter(x => new Date(x.fecha) <= td);
+    }
     const start = (q.page - 1) * q.limit;
     const paged = items.slice(start, start + q.limit);
     return { items: paged, total: items.length, page: q.page, limit: q.limit };
@@ -281,7 +348,15 @@ app.get('/api/v1/planillas', { preHandler: [app.auth] }, async (req) => {
 
   const where = {
     ...(q.cliente ? { cliente: { contains: q.cliente, mode: 'insensitive' } } : {}),
-    ...(q.proyecto ? { proyecto: { contains: q.proyecto, mode: 'insensitive' } } : {})
+    ...(q.proyecto ? { proyecto: { contains: q.proyecto, mode: 'insensitive' } } : {}),
+    ...(q.from || q.to
+      ? {
+          fecha: {
+            ...(q.from ? { gte: new Date(`${q.from}T00:00:00`) } : {}),
+            ...(q.to ? { lte: new Date(`${q.to}T23:59:59`) } : {})
+          }
+        }
+      : {})
   };
   const [total, rows] = await Promise.all([
     prisma.planilla.count({ where }),
