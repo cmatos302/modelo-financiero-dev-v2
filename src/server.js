@@ -91,6 +91,34 @@ async function findPlanillaByIdOrCorrelativo(idOrCorrelativo) {
   return prisma.planilla.findFirst({ where: { OR: [{ id: idOrCorrelativo }, { correlativo: idOrCorrelativo }] } });
 }
 
+
+async function fetchIssuedMapByReferences(refs = []) {
+  const keys = Array.from(new Set((refs || []).map(r => String(r || '').trim()).filter(Boolean)));
+  if (!sbAdmin || keys.length === 0) return new Map();
+
+  const { data, error } = await sbAdmin
+    .from('issued_invoices')
+    .select('reference, amount_bs, payload')
+    .in('reference', keys);
+
+  if (error || !Array.isArray(data)) return new Map();
+
+  const m = new Map();
+  for (const row of data) {
+    const payload = row?.payload || {};
+    const baseBs = payload?.base_bs ?? payload?.monto_base_bs ?? null;
+    const ivaBs = payload?.iva_bs ?? payload?.monto_iva_bs ?? null;
+    const totalBs = payload?.total_bs ?? payload?.monto_total_bs ?? payload?.monto_facturado_bs ?? null;
+    m.set(String(row.reference), {
+      amount_bs: row?.amount_bs == null ? null : Number(row.amount_bs),
+      base_bs: baseBs == null ? null : Number(baseBs),
+      iva_bs: ivaBs == null ? null : Number(ivaBs),
+      monto_total_bs: totalBs == null ? null : Number(totalBs)
+    });
+  }
+  return m;
+}
+
 async function buildPlanillaPdfBuffer(planilla) {
   const monto = Number(planilla.monto_bruto_usd ?? planilla.montoBrutoUsd ?? 0);
   const correlativo = String(planilla.correlativo || '').padStart(4, '0');
@@ -368,8 +396,10 @@ app.get('/api/v1/planillas', { preHandler: [app.auth] }, async (req) => {
       include: { items: { select: { horas: true, tipo: true } } }
     })
   ]);
+  const issuedMap = await fetchIssuedMapByReferences(rows.map(r => r.correlativo));
   const items = rows.map(r => {
     const horasTotal = (r.items || []).reduce((acc, it) => acc + Number(it?.horas || 0), 0);
+    const issued = issuedMap.get(String(r.correlativo)) || {};
     return {
       id: r.id,
       correlativo: r.correlativo,
@@ -378,7 +408,11 @@ app.get('/api/v1/planillas', { preHandler: [app.auth] }, async (req) => {
       proyecto: r.proyecto,
       monto_bruto_usd: Number(r.montoBrutoUsd),
       horas: horasTotal,
-      tipo: (r.items?.[0]?.tipo || 'FORMULADAS')
+      tipo: (r.items?.[0]?.tipo || 'FORMULADAS'),
+      base_bs: issued.base_bs ?? null,
+      iva_bs: issued.iva_bs ?? null,
+      monto_total_bs: issued.monto_total_bs ?? null,
+      amount_bs: issued.amount_bs ?? null
     };
   });
   return { items, total, page: q.page, limit: q.limit };
@@ -410,6 +444,8 @@ app.get('/api/v1/planillas/:id', { preHandler: [app.auth] }, async (req, reply) 
   if (!p) return reply.code(404).send({ error: 'No encontrado' });
 
   const horasTotal = (p.items || []).reduce((acc, it) => acc + Number(it?.horas || 0), 0);
+  const issuedMapOne = await fetchIssuedMapByReferences([p.correlativo]);
+  const issued = issuedMapOne.get(String(p.correlativo)) || {};
   return {
     id: p.id,
     correlativo: p.correlativo,
@@ -419,6 +455,10 @@ app.get('/api/v1/planillas/:id', { preHandler: [app.auth] }, async (req, reply) 
     monto_bruto_usd: Number(p.montoBrutoUsd),
     horas: horasTotal,
     tipo: (p.items?.[0]?.tipo || 'FORMULADAS'),
+    base_bs: issued.base_bs ?? null,
+    iva_bs: issued.iva_bs ?? null,
+    monto_total_bs: issued.monto_total_bs ?? null,
+    amount_bs: issued.amount_bs ?? null,
     items: (p.items || []).map(it => ({
       id: it.id,
       tipo: it.tipo,
