@@ -93,29 +93,53 @@ async function findPlanillaByIdOrCorrelativo(idOrCorrelativo) {
 
 
 async function fetchIssuedMapByReferences(refs = []) {
-  const keys = Array.from(new Set((refs || []).map(r => String(r || '').trim()).filter(Boolean)));
-  if (!sbAdmin || keys.length === 0) return new Map();
+  if (!sbAdmin) return new Map();
 
   const { data, error } = await sbAdmin
-    .from('issued_invoices')
-    .select('reference, amount_bs, payload')
-    .in('reference', keys);
-
-  if (error || !Array.isArray(data)) return new Map();
+    .from('kv_store')
+    .select('value')
+    .eq('key', 'fiscalOps')
+    .single();
 
   const m = new Map();
-  for (const row of data) {
-    const payload = row?.payload || {};
-    const baseBs = payload?.base_bs ?? payload?.monto_base_bs ?? null;
-    const ivaBs = payload?.iva_bs ?? payload?.monto_iva_bs ?? null;
-    const totalBs = payload?.total_bs ?? payload?.monto_total_bs ?? payload?.monto_facturado_bs ?? null;
-    m.set(String(row.reference), {
-      amount_bs: row?.amount_bs == null ? null : Number(row.amount_bs),
-      base_bs: baseBs == null ? null : Number(baseBs),
-      iva_bs: ivaBs == null ? null : Number(ivaBs),
-      monto_total_bs: totalBs == null ? null : Number(totalBs)
-    });
+  if (error || !data || !Array.isArray(data.value)) return m;
+
+  for (const op of data.value) {
+    let corr = null;
+    if (op.projectKey && op.projectKey.startsWith('LEGACY-')) {
+        corr = op.projectKey.replace('LEGACY-', '');
+    } else if (op.proyecto) {
+        // Fallback to finding correlativo by matching proyecto name? 
+        // We'll leave it as projectKey for now.
+    }
+    
+    // Si no encontramos correlativo directo, intentamos machear por nombre del proyecto
+    if (!corr && op.proyecto) {
+       // esto es más lento pero funciona como fallback si no hay LEGACY-
+       corr = op.proyecto; 
+    }
+
+    if (corr) {
+        const existing = m.get(corr) || { base_bs: 0, iva_bs: 0, monto_total_bs: 0 };
+        existing.base_bs += (op.base || 0);
+        existing.iva_bs += (op.iva || 0);
+        existing.monto_total_bs += (op.totalBs || 0);
+        m.set(corr, existing);
+    }
   }
+  
+  // También hacemos mapping por el nombre de proyecto como fallback
+  for (const op of data.value) {
+     if (op.proyecto) {
+        const pName = String(op.proyecto).trim().toLowerCase();
+        const existing = m.get(pName) || { base_bs: 0, iva_bs: 0, monto_total_bs: 0 };
+        existing.base_bs += (op.base || 0);
+        existing.iva_bs += (op.iva || 0);
+        existing.monto_total_bs += (op.totalBs || 0);
+        m.set(pName, existing);
+     }
+  }
+  
   return m;
 }
 
@@ -410,7 +434,7 @@ app.get('/api/v1/planillas', { preHandler: [app.auth] }, async (req) => {
   const items = rows.map(r => {
     const horasTotal = (r.items || []).reduce((acc, it) => acc + Number(it?.horas || 0), 0);
     const nombresConsultores = (r.items || []).map(i => i.nombre).filter(Boolean).join(', ');
-    const issued = issuedMap.get(String(r.correlativo)) || {};
+    const issued = issuedMap.get(String(r.correlativo)) || issuedMap.get(String(r.proyecto).trim().toLowerCase()) || {};
     
     // Si no hay valores liquidados, estimar con BCV
     const montoUsd = Number(r.montoBrutoUsd);
@@ -470,7 +494,7 @@ app.get('/api/v1/planillas/:id', { preHandler: [app.auth] }, async (req, reply) 
 
   const horasTotal = (p.items || []).reduce((acc, it) => acc + Number(it?.horas || 0), 0);
   const issuedMapOne = await fetchIssuedMapByReferences([p.correlativo]);
-  const issued = issuedMapOne.get(String(p.correlativo)) || {};
+  const issued = issuedMapOne.get(String(p.correlativo)) || issuedMapOne.get(String(p.proyecto).trim().toLowerCase()) || {};
   return {
     id: p.id,
     correlativo: p.correlativo,
