@@ -397,23 +397,46 @@ app.get('/api/v1/planillas', { preHandler: [app.auth] }, async (req) => {
     })
   ]);
   const issuedMap = await fetchIssuedMapByReferences(rows.map(r => r.correlativo));
+  
+  // Obtener la última tasa BCV para estimaciones
+  let ultimaTasaBcv = 0;
+  if (dbEnabled) {
+    const tasaRow = await prisma.tasa.findFirst({ orderBy: { fecha: 'desc' } });
+    if (tasaRow) ultimaTasaBcv = Number(tasaRow.bcv);
+  } else if (tasasMem.length > 0) {
+    ultimaTasaBcv = tasasMem[0].bcv;
+  }
+
   const items = rows.map(r => {
     const horasTotal = (r.items || []).reduce((acc, it) => acc + Number(it?.horas || 0), 0);
-      const nombresConsultores = (r.items || []).map(i => i.nombre).filter(Boolean).join(', ');
+    const nombresConsultores = (r.items || []).map(i => i.nombre).filter(Boolean).join(', ');
     const issued = issuedMap.get(String(r.correlativo)) || {};
+    
+    // Si no hay valores liquidados, estimar con BCV
+    const montoUsd = Number(r.montoBrutoUsd);
+    let baseBs = issued.base_bs;
+    let ivaBs = issued.iva_bs;
+    let totalBs = issued.monto_total_bs;
+    
+    if (baseBs == null && ultimaTasaBcv > 0) {
+        baseBs = montoUsd * ultimaTasaBcv;
+        ivaBs = baseBs * 0.16;
+        totalBs = baseBs + ivaBs;
+    }
+
     return {
       id: r.id,
       correlativo: r.correlativo,
       fecha: r.fecha,
       cliente: r.cliente,
       proyecto: r.proyecto,
-      monto_bruto_usd: Number(r.montoBrutoUsd),
+      monto_bruto_usd: montoUsd,
       horas: horasTotal,
       tipo: (r.items?.[0]?.tipo || 'FORMULADAS'),
-        consultor_nombre: nombresConsultores || null,
-      base_bs: issued.base_bs ?? null,
-      iva_bs: issued.iva_bs ?? null,
-      monto_total_bs: issued.monto_total_bs ?? null,
+      consultor_nombre: nombresConsultores || null,
+      base_bs: baseBs ?? null,
+      iva_bs: ivaBs ?? null,
+      monto_total_bs: totalBs ?? null,
       amount_bs: issued.amount_bs ?? null
     };
   });
