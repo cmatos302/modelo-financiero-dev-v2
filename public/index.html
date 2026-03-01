@@ -4862,7 +4862,14 @@
         const body = {
           cliente: String(p.cliente || '').trim(),
           proyecto: String(p.proyecto || '').trim(),
-          monto_bruto_usd: parseMoneySafe(p?.totales?.precioFinal)
+          monto_bruto_usd: parseMoneySafe(p?.totales?.precioFinal),
+          items: (p.consultores || []).map(c => ({
+            nombre: c.nombre,
+            especialidad: c.especialidad,
+            tarifaUsd: c.tarifa,
+            horas: c.horas,
+            costoUsd: c.costo
+          }))
         };
         if (!body.cliente || !body.proyecto) { failed++; continue; }
 
