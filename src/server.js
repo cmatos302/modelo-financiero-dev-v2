@@ -393,12 +393,13 @@ app.get('/api/v1/planillas', { preHandler: [app.auth] }, async (req) => {
       orderBy: { fecha: 'desc' },
       skip: (q.page - 1) * q.limit,
       take: q.limit,
-      include: { items: { select: { horas: true, tipo: true } } }
+      include: { items: { select: { horas: true, tipo: true, nombre: true } } }
     })
   ]);
   const issuedMap = await fetchIssuedMapByReferences(rows.map(r => r.correlativo));
   const items = rows.map(r => {
     const horasTotal = (r.items || []).reduce((acc, it) => acc + Number(it?.horas || 0), 0);
+      const nombresConsultores = (r.items || []).map(i => i.nombre).filter(Boolean).join(', ');
     const issued = issuedMap.get(String(r.correlativo)) || {};
     return {
       id: r.id,
@@ -409,6 +410,7 @@ app.get('/api/v1/planillas', { preHandler: [app.auth] }, async (req) => {
       monto_bruto_usd: Number(r.montoBrutoUsd),
       horas: horasTotal,
       tipo: (r.items?.[0]?.tipo || 'FORMULADAS'),
+        consultor_nombre: nombresConsultores || null,
       base_bs: issued.base_bs ?? null,
       iva_bs: issued.iva_bs ?? null,
       monto_total_bs: issued.monto_total_bs ?? null,
@@ -472,7 +474,7 @@ app.get('/api/v1/planillas/:id', { preHandler: [app.auth] }, async (req, reply) 
 });
 
 app.post('/api/v1/planillas', { preHandler: [app.auth, app.mustWrite] }, async (req, reply) => {
-  const schema = z.object({ cliente: z.string().min(1), proyecto: z.string().min(1), monto_bruto_usd: z.number().nonnegative(), horas: z.number().nonnegative().optional(), tipo: z.string().min(1).optional() });
+  const schema = z.object({ cliente: z.string().min(1), proyecto: z.string().min(1), monto_bruto_usd: z.number().nonnegative(), horas: z.number().nonnegative().optional(), tipo: z.string().min(1).optional(), items: z.array(z.object({ nombre: z.string().optional(), tipo: z.string().optional(), horas: z.number().optional(), tarifaUsd: z.number().optional(), costoUsd: z.number().optional(), especialidad: z.string().optional() })).optional() });
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return reply.code(422).send({ error: 'Payload inválido' });
 
@@ -495,7 +497,21 @@ app.post('/api/v1/planillas', { preHandler: [app.auth, app.mustWrite] }, async (
     }
   });
 
-  if (typeof parsed.data.horas === 'number' || parsed.data.tipo) {
+  if (parsed.data.items && parsed.data.items.length > 0) {
+    for (const item of parsed.data.items) {
+      await prisma.planillaItem.create({
+        data: {
+          planillaId: created.id,
+          tipo: item.tipo || parsed.data.tipo || 'FORMULADAS',
+          nombre: item.nombre || 'Servicio consultoría',
+          horas: item.horas != null ? item.horas : null,
+          tarifaUsd: item.tarifaUsd != null ? item.tarifaUsd : null,
+          costoUsd: item.costoUsd != null ? item.costoUsd : null,
+          especialidad: item.especialidad || null
+        }
+      });
+    }
+  } else if (typeof parsed.data.horas === 'number' || parsed.data.tipo) {
     await prisma.planillaItem.create({
       data: {
         planillaId: created.id,
@@ -536,7 +552,7 @@ app.post('/api/v1/planillas', { preHandler: [app.auth, app.mustWrite] }, async (
 });
 
 app.put('/api/v1/planillas/:id', { preHandler: [app.auth, app.mustWrite] }, async (req, reply) => {
-  const schema = z.object({ cliente: z.string().min(1).optional(), proyecto: z.string().min(1).optional(), monto_bruto_usd: z.number().nonnegative().optional(), horas: z.number().nonnegative().optional(), tipo: z.string().min(1).optional() });
+  const schema = z.object({ cliente: z.string().min(1).optional(), proyecto: z.string().min(1).optional(), monto_bruto_usd: z.number().nonnegative().optional(), horas: z.number().nonnegative().optional(), tipo: z.string().min(1).optional(), items: z.array(z.object({ id: z.string().optional(), nombre: z.string().optional(), tipo: z.string().optional(), horas: z.number().optional(), tarifaUsd: z.number().optional(), costoUsd: z.number().optional(), especialidad: z.string().optional() })).optional() });
   const parsed = schema.safeParse(req.body || {});
   if (!parsed.success) return reply.code(422).send({ error: 'Payload inválido' });
 
@@ -559,7 +575,23 @@ app.put('/api/v1/planillas/:id', { preHandler: [app.auth, app.mustWrite] }, asyn
     }
   });
 
-  if (typeof parsed.data.horas === 'number' || parsed.data.tipo) {
+  if (parsed.data.items) {
+    // Delete old items and insert new ones to keep it simple
+    await prisma.planillaItem.deleteMany({ where: { planillaId: req.params.id } });
+    for (const item of parsed.data.items) {
+      await prisma.planillaItem.create({
+        data: {
+          planillaId: req.params.id,
+          tipo: item.tipo || parsed.data.tipo || 'FORMULADAS',
+          nombre: item.nombre || 'Servicio consultoría',
+          horas: item.horas != null ? item.horas : null,
+          tarifaUsd: item.tarifaUsd != null ? item.tarifaUsd : null,
+          costoUsd: item.costoUsd != null ? item.costoUsd : null,
+          especialidad: item.especialidad || null
+        }
+      });
+    }
+  } else if (typeof parsed.data.horas === 'number' || parsed.data.tipo) {
     const firstItem = await prisma.planillaItem.findFirst({ where: { planillaId: req.params.id }, orderBy: { createdAt: 'asc' } });
     if (firstItem) {
       await prisma.planillaItem.update({
